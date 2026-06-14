@@ -1,0 +1,9 @@
+# Rust build artifacts
+/winhint/target/
+
+# Claude Code runtime lock
+.claude/scheduled_tasks.lock
+
+# OS / editor cruft
+Thumbs.db
+.DS_Store

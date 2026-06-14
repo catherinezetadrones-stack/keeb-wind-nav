@@ -1,0 +1,25 @@
+[package]
+name = "winhint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Pinned to 0.62 to match webview2-com's re-exported windows version, so HWND
+# and COM types interop across both crates.
+windows = { version = "0.62", features = [
+    "Win32_UI_Accessibility",       # IUIAutomation, tree walker, UIA types
+    "Win32_UI_WindowsAndMessaging", # window creation, message loop, GetForegroundWindow
+    "Win32_Foundation",             # HWND, RECT, BOOL, LRESULT, WPARAM, LPARAM
+    "Win32_System_Com",             # CoInitializeEx / CoCreateInstance
+    "Win32_System_LibraryLoader",   # GetModuleHandleW
+    "Win32_Graphics_Gdi",           # window class background, paint
+    "Win32_UI_HiDpi",               # per-monitor DPI awareness
+    "Win32_Graphics_Direct3D11",    # D3D11CreateDevice (backs the DComp device)
+    "Win32_Graphics_Direct3D",      # D3D_DRIVER_TYPE / feature levels
+    "Win32_Graphics_Dxgi",          # IDXGIDevice bridge to DirectComposition
+    "Win32_Graphics_Dxgi_Common",   # DXGI enums
+    "Win32_Graphics_DirectComposition", # IDCompositionDevice/Target/Visual
+    "Win32_UI_Input_KeyboardAndMouse",  # SendInput, GetAsyncKeyState, VK_* (hook + click)
+] }
+webview2-com = "0.39"
+anyhow = "1.0.102"

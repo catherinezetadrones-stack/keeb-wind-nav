@@ -18,7 +18,10 @@ mod overlay;
 mod scanner;
 
 use anyhow::Result;
+use windows::core::w;
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -75,5 +78,60 @@ fn run(scan_only: bool, debug: bool, delay: u64) -> Result<()> {
         return Ok(());
     }
 
+    // Single-instance guard (daemon mode only — `--scan` is a one-shot that
+    // installs no hook, so it may run alongside a daemon). A second daemon would
+    // install a second global CapsLock hook and the two would fight over every
+    // keystroke, so refuse to start when one is already running. This is the
+    // desktop analog of a "port already in use" error.
+    let _instance = match SingleInstance::acquire() {
+        Some(guard) => guard,
+        None => {
+            eprintln!("WinHint is already running — only one instance can run at a time.");
+            return Ok(());
+        }
+    };
+
     app::run(debug)
+}
+
+/// Holds the single-instance named mutex for the lifetime of the daemon.
+/// Dropping it (on process exit) releases the mutex so the next launch succeeds.
+struct SingleInstance(HANDLE);
+
+impl SingleInstance {
+    /// Try to become the one running WinHint. Returns `None` when another
+    /// instance already owns the named mutex.
+    ///
+    /// The `Local\` prefix scopes the mutex to the current user session — one
+    /// WinHint per desktop, which is what we want (a different logged-in user
+    /// gets their own).
+    fn acquire() -> Option<Self> {
+        // SAFETY: CreateMutexW with a static, session-local name. GetLastError is
+        // read immediately after, before any other call can reset it.
+        unsafe {
+            let handle = match CreateMutexW(None, true, w!("Local\\WinHint_SingleInstance")) {
+                Ok(h) => h,
+                // Couldn't create the mutex (resource exhaustion, etc.). Don't
+                // block startup over a guard we failed to establish; hold a null
+                // handle so the rest of the flow is unchanged.
+                Err(_) => return Some(SingleInstance(HANDLE::default())),
+            };
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                let _ = CloseHandle(handle);
+                return None;
+            }
+            Some(SingleInstance(handle))
+        }
+    }
+}
+
+impl Drop for SingleInstance {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a handle from CreateMutexW (or null on the failed-
+        // create path, where CloseHandle is a harmless no-op). Closing it
+        // releases the mutex so a subsequent launch can acquire it.
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
 }

@@ -12,6 +12,8 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",             # HWND, RECT, BOOL, LRESULT, WPARAM, LPARAM
     "Win32_System_Com",             # CoInitializeEx / CoCreateInstance
     "Win32_System_LibraryLoader",   # GetModuleHandleW
+    "Win32_System_Threading",       # CreateMutexW (single-instance guard)
+    "Win32_Security",               # SECURITY_ATTRIBUTES param of CreateMutexW
     "Win32_Graphics_Gdi",           # window class background, paint
     "Win32_UI_HiDpi",               # per-monitor DPI awareness
     "Win32_Graphics_Direct3D11",    # D3D11CreateDevice (backs the DComp device)

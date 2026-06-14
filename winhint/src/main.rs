@@ -36,6 +36,7 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let scan_only = args.iter().any(|a| a == "--scan");
+    let tree = args.iter().any(|a| a == "--tree");
     let debug = args.iter().any(|a| a == "--debug");
     let delay: u64 = args.iter().find_map(|a| a.parse::<u64>().ok()).unwrap_or(0);
 
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
 
-    let result = run(scan_only, debug, delay);
+    let result = run(scan_only, tree, debug, delay);
 
     // SAFETY: matches the CoInitializeEx above on this thread.
     unsafe {
@@ -55,13 +56,17 @@ fn main() -> Result<()> {
     result
 }
 
-fn run(scan_only: bool, debug: bool, delay: u64) -> Result<()> {
-    if scan_only {
+fn run(scan_only: bool, tree: bool, debug: bool, delay: u64) -> Result<()> {
+    if scan_only || tree {
         if delay > 0 {
             for n in (1..=delay).rev() {
                 eprintln!("Scanning foreground window in {n}s — focus your target...");
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
+        }
+        if tree {
+            scanner::dump_tree()?;
+            return Ok(());
         }
         let hints = scanner::scan_foreground()?;
         println!("Found {} clickable element(s):\n", hints.len());

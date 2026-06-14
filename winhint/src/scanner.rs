@@ -49,8 +49,10 @@ pub struct Hint {
     pub above: bool,
 }
 
-/// Maximum tree depth to descend. Matches the prototype's proven value.
-const MAX_DEPTH: usize = 12;
+/// Maximum tree depth to descend. Web documents (browser content) nest far
+/// deeper than native UI — links in a real page sit at depth ~13–24 — so this
+/// must be generous enough to reach them. Native apps bottom out well before it.
+const MAX_DEPTH: usize = 32;
 /// Cap on collected elements — keeps the scan snappy on dense windows. Shared
 /// across all scanned host windows (foreground is walked first), so this is set
 /// high enough that a busy app window won't starve the later taskbar scan.
@@ -90,6 +92,60 @@ pub fn scan_foreground() -> Result<Vec<Hint>> {
         }
 
         Ok(hints)
+    }
+}
+
+/// DIAGNOSTIC (temporary): dump the full *raw* UIA tree of the foreground window
+/// to stdout — every node, unfiltered, with depth, control-type id, and name.
+/// Used to investigate why some content (e.g. browser web documents) does or
+/// does not appear in the control-view walk. Not used by the daemon.
+pub fn dump_tree() -> Result<()> {
+    // SAFETY: standard UIA calls; COM is initialized by the caller.
+    unsafe {
+        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)?;
+        // RawViewWalker shows the complete tree (including non-control nodes),
+        // so nothing is hidden by control-view filtering.
+        let walker = automation.RawViewWalker()?;
+        let hwnd = app_window();
+        if hwnd.0.is_null() {
+            println!("[dump] no app window to scan");
+            return Ok(());
+        }
+        let root = automation.ElementFromHandle(hwnd)?;
+        let mut count = 0usize;
+        dump_walk(&walker, &root, 0, &mut count);
+        println!("[dump] {count} nodes total");
+        Ok(())
+    }
+}
+
+/// Recursive helper for `dump_tree`. Prints `depth | ct=<id> | name`, indented.
+unsafe fn dump_walk(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+    depth: usize,
+    count: &mut usize,
+) {
+    if depth > 30 || *count >= 5000 {
+        return;
+    }
+    let ct = element.CurrentControlType().map(|c| c.0).unwrap_or(0);
+    let name = element
+        .CurrentName()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let name_short: String = name.chars().take(70).collect();
+    let indent = depth.min(24);
+    println!("{depth:>3} {:indent$}ct={ct} {name_short}", "");
+    *count += 1;
+
+    let mut child = walker.GetFirstChildElement(element);
+    while let Ok(node) = child {
+        if *count >= 5000 {
+            break;
+        }
+        dump_walk(walker, &node, depth + 1, count);
+        child = walker.GetNextSiblingElement(&node);
     }
 }
 

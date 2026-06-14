@@ -150,7 +150,7 @@ pub fn run(debug: bool) -> Result<()> {
         });
 
         hotkey::set_debug(debug);
-        let hook = hotkey::install(hwnd)?;
+        hotkey::install(hwnd)?;
         eprintln!(
             "WinHint running — tap CapsLock to activate · type to search/hint · ↑/↓ select · \
              Enter clicks the selection (Shift+Enter = right-click) · Tab cycles \
@@ -162,7 +162,7 @@ pub fn run(debug: bool) -> Result<()> {
 
         run_message_loop();
 
-        hotkey::uninstall(hook);
+        hotkey::uninstall();
     }
     Ok(())
 }

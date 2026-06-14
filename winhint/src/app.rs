@@ -15,10 +15,11 @@ use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetSystemMetrics, LoadCursorW,
-    PostQuitMessage, RegisterClassW, ShowWindow, TranslateMessage, IDC_ARROW, MSG,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-    SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WM_APP, WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    PostQuitMessage, RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST,
+    IDC_ARROW, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WM_APP,
+    WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::click;
@@ -95,8 +96,13 @@ impl Mode {
 /// One scanned, labeled hint target.
 struct HintEntry {
     label: String,
+    /// Click target (element center), physical pixels.
     x: i32,
     y: i32,
+    /// Element top edge — label anchor when `above` is set.
+    top: i32,
+    /// Render the label above the element rather than centered on it (tray icons).
+    above: bool,
     /// Accessible name, lower-cased once for case-insensitive search.
     name: String,
 }
@@ -286,6 +292,8 @@ unsafe fn activate(app: &mut App, hwnd: HWND) -> Result<()> {
             label,
             x: h.cx,
             y: h.cy,
+            top: h.top,
+            above: h.above,
             name: h.name.to_lowercase(),
         })
         .collect();
@@ -294,7 +302,20 @@ unsafe fn activate(app: &mut App, hwnd: HWND) -> Result<()> {
 
     render_state(app);
     app.overlay.set_visible(true)?;
-    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    // Re-assert top-of-band z-order every activation (not just ShowWindow):
+    // interacting with the shell — e.g. clicking a tray icon, which opens a
+    // topmost flyout — can leave our overlay buried in the topmost band, so a
+    // plain show would activate but stay invisible. HWND_TOPMOST + SWP_SHOWWINDOW
+    // both shows it and raises it to the front without stealing focus.
+    let _ = SetWindowPos(
+        hwnd,
+        Some(HWND_TOPMOST),
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
     app.active = true;
     hotkey::set_active(true);
     Ok(())
@@ -329,8 +350,11 @@ unsafe fn handle_key(app: &mut App, hwnd: HWND, vk: u32, shift: bool) {
     }
     app.typed.push(ch);
 
-    // A completed, prefix-free hint label is unambiguous → click it.
-    if app.mode.uses_hints() {
+    // Only the dedicated Hints mode auto-clicks on a completed hint label. In
+    // Both/Search you may be typing a search word whose prefix happens to equal
+    // a short hint code, so selection there is Enter-only (or arrows + Enter) to
+    // avoid early exits mid-word.
+    if app.mode == Mode::Hints {
         if let Some(idx) = exact_hint(&app.hints, &app.typed) {
             do_click(app, hwnd, idx, shift);
             return;
@@ -454,7 +478,14 @@ fn render_state(app: &App) {
         .map(|&i| RenderItem {
             label: app.hints[i].label.clone(),
             x: app.hints[i].x,
-            y: app.hints[i].y,
+            // Above-anchored labels render off the element's top edge; others
+            // render centered on the click point.
+            y: if app.hints[i].above {
+                app.hints[i].top
+            } else {
+                app.hints[i].y
+            },
+            above: app.hints[i].above,
             typed: if hint_set.contains(&i) { typed_len } else { 0 },
             selected: sel == Some(i),
         })
@@ -549,6 +580,8 @@ mod tests {
             label: label.to_string(),
             x: 0,
             y: 0,
+            top: 0,
+            above: false,
             name: name.to_lowercase(),
         }
     }

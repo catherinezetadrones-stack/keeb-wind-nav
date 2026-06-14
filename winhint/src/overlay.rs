@@ -44,6 +44,8 @@ pub struct RenderItem {
     pub y: i32,
     pub typed: usize,
     pub selected: bool,
+    /// Anchor the label above `(x, y)` (y = element top) rather than centered on it.
+    pub above: bool,
 }
 
 /// One row in the results list (the search bar's drop-down): a hint code, the
@@ -190,12 +192,13 @@ fn items_json(items: &[RenderItem]) -> String {
             s.push(',');
         }
         s.push_str(&format!(
-            "{{l:\"{}\",x:{},y:{},t:{},s:{}}}",
+            "{{l:\"{}\",x:{},y:{},t:{},s:{},a:{}}}",
             it.label.to_uppercase(),
             it.x,
             it.y,
             it.typed,
-            it.selected as u8
+            it.selected as u8,
+            it.above as u8
         ));
     }
     s.push(']');
@@ -239,6 +242,7 @@ html,body{{margin:0;padding:0;width:100%;height:100%;background:{body_bg};overfl
   border:1px solid #00e5cc;color:#00e5cc;font-size:12px;font-weight:700;
   padding:1px 5px;border-radius:3px;white-space:nowrap;
   box-shadow:0 1px 5px rgba(0,0,0,.6);}}
+.hint.above{{transform:translate(-50%,calc(-100% - 3px));}}
 .hint.sel{{background:#00e5cc;color:#0d1117;border-color:#fff;z-index:10;
   animation:hintpulse 1.1s ease-in-out infinite;}}
 @keyframes hintpulse{{
@@ -259,7 +263,7 @@ html,body{{margin:0;padding:0;width:100%;height:100%;background:{body_bg};overfl
 .hdr .q{{color:#e6edf3;white-space:pre;}}
 .hdr .ph{{color:#6b7681;}}
 .hdr .caret{{color:#00e5cc;}}
-.list{{max-height:60vh;overflow:hidden;padding-bottom:4px;}}
+.list{{max-height:260px;overflow:hidden;padding-bottom:4px;}}
 .row{{display:flex;align-items:center;padding:3px 12px;font-size:13px;}}
 .row .code{{color:#00e5cc;font-weight:700;min-width:28px;}}
 .row .name{{color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
@@ -267,6 +271,11 @@ html,body{{margin:0;padding:0;width:100%;height:100%;background:{body_bg};overfl
 .row.sel .code,.row.sel .name{{color:#0d1117;}}
 .divider{{height:1px;margin:5px 16px;
   background:linear-gradient(to right,transparent,rgba(0,229,204,.55),transparent);}}
+.legend{{display:flex;flex-wrap:wrap;gap:4px 14px;padding:5px 12px 6px;
+  border-top:1px solid rgba(255,255,255,.05);font-size:11px;white-space:nowrap;}}
+.legend .lg{{color:#6b7681;}}
+.legend .k{{display:inline-block;background:#161b22;border:1px solid #30363d;
+  border-radius:3px;padding:0 4px;margin-right:2px;color:#c9d1d9;font-size:10px;}}
 </style></head><body><script>
 const dpr=window.devicePixelRatio||1;
 function mkRow(r){{
@@ -275,6 +284,24 @@ function mkRow(r){{
   const n=document.createElement('span'); n.className='name';
   n.textContent=(r.n&&r.n.length)?r.n:'—';
   d.appendChild(c); d.appendChild(n); return d;
+}}
+// One legend entry: keycap(s) + a label, e.g. chip(['⇧','↵'],'right-click').
+function chip(keys,label){{
+  const w=document.createElement('span'); w.className='lg';
+  for(const key of keys){{
+    const k=document.createElement('span'); k.className='k'; k.textContent=key;
+    w.appendChild(k);
+  }}
+  w.appendChild(document.createTextNode(label));
+  return w;
+}}
+function mkLegend(){{
+  const lg=document.createElement('div'); lg.className='legend';
+  lg.appendChild(chip(['↵'],'select'));
+  lg.appendChild(chip(['⇧','↵'],'right-click'));
+  lg.appendChild(chip(['↑','↓'],'move'));
+  lg.appendChild(chip(['⇥'],'mode'));
+  return lg;
 }}
 function render(state){{
   const b=document.body; b.innerHTML='';
@@ -297,21 +324,26 @@ function render(state){{
   const car=document.createElement('span'); car.className='caret';
   car.textContent='▌'; hdr.appendChild(car);
   pal.appendChild(hdr);
+  pal.appendChild(mkLegend());
 
+  let selRow=null;
   if(top.length || bot.length){{
     const list=document.createElement('div'); list.className='list';
-    for(const r of top) list.appendChild(mkRow(r));
+    for(const r of top){{ const el=mkRow(r); if(r.s) selRow=el; list.appendChild(el); }}
     if(top.length && bot.length){{
       const dv=document.createElement('div'); dv.className='divider'; list.appendChild(dv);
     }}
-    for(const r of bot) list.appendChild(mkRow(r));
+    for(const r of bot){{ const el=mkRow(r); if(r.s) selRow=el; list.appendChild(el); }}
     pal.appendChild(list);
   }}
   b.appendChild(pal);
+  // Keep the arrow-selected row visible in the capped, scrollable list.
+  if(selRow) selRow.scrollIntoView({{block:'nearest'}});
 
   // --- floating labels over each element ---
   for(const h of fl){{
-    const d=document.createElement('div'); d.className='hint'+(h.s?' sel':'');
+    const d=document.createElement('div');
+    d.className='hint'+(h.s?' sel':'')+(h.a?' above':'');
     const t=h.t||0;
     if(t>0){{
       const s=document.createElement('span'); s.className='typed';

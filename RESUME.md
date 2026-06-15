@@ -1,59 +1,76 @@
-# RESUME.md — WinHint pickup document
+# RESUME — Pane-Splitter Resize (foundation done, integration pending)
 
-Session date: 2026-06-13. Worked the **App UI / UX Improvements** section of `TODO.md`.
+The window-resize feature is **complete** (committed work + this session's
+double-tap/handle wiring; all built & tested). We then added **pane-splitter
+resize**: resize the boundary between two panes by simulating a mouse drag on
+their shared edge. The pure foundation is built, tested, and compiles clean; the
+overlay + app.rs integration is not started.
 
----
+**Read `RESIZE_PLAN.md` — it is the authoritative, step-by-step pickup doc** (full
+design decisions, empirical grounding, and the ordered integration tasks).
 
 ## 1. Completed this session
 
-- **CapsLock toggle** (`hotkey.rs`): tap CapsLock to enter hint mode, tap again (or Esc) to leave; Caps key-up suppressed in all orderings so the Caps light never flips.
-- **`click.rs`**: refactored shared normalization into `send_at(x,y,down,up)`; added `right_click` alongside `click`.
-- **Search-first → 3-mode interaction model** (final, per user). ONE keystroke buffer `typed`, three modes:
-  - **Both**: typing matches two ways at once — hint-label prefix (top "hint" section) and name substring (bottom "search" section), shown in a results-list panel under the search bar, split by a horizontal tapered divider. Completing a prefix-free hint label clicks it; Enter clicks the top name match.
-  - **Search**: name substring only; Enter clicks the top match; no hint completion.
-  - **Hints**: hint code only (letters accepted); completing a label clicks it.
-  - **Tab** cycles Both→Search→Hints; **mode is sticky** across activations (only `typed` is cleared on activate/deactivate, never `mode`; default Both).
-  - Floating labels stay over elements in all modes (union of the two match sets; hint-prefix matches get an orange-colored prefix). Shift+Enter / Shift+completed-hint = right-click. Empty buffer → Enter is a no-op and nothing is highlighted.
-- **Files**: `app.rs` (Mode enum with next/badge/uses_hints/uses_search; `App{typed,mode,hints}`; handle_key/handle_confirm/handle_tab/do_click/enter_target/render_state/row/name_matches/hint_matches/exact_hint; 6 unit tests). `overlay.rs` (`ListRow` struct; `render(floating,query,mode_badge,top,bottom)`; `rows_json` escapes the untrusted name; palette UI = badge + query + results list + `.divider` gradient + floating `.hint` labels; `json_escape_str`). `hotkey.rs` (forwards a–z/0–9/Space/Backspace as `WM_APP_KEY` + Shift bit; Enter→`WM_APP_CONFIRM`; Tab→`WM_APP_TAB`). `CLAUDE.md` Activation row updated.
-- **Build green; `cargo test` = 9 passed.** Two reviewer passes: first feature clean (one UX wrinkle fixed); 3-mode redesign clean after fixing one bug (empty-buffer highlighted element 0 — now gated on `has_typed`).
+**Window-resize feature (done, uncommitted):** `app.rs` UiState refactor +
+`enter_resize`/`handle_resize_*`/`exit_resize`, `hotkey.rs` double-tap CapsLock +
+NAV_H, `overlay.rs` `render_resize`. 20 tests pass. Validated live by the user
+("works like a charm").
+
+**Splitter foundation (done, uncommitted):**
+- `winhint/src/splitter.rs` (NEW) — pure geometry: `Orientation`, `Boundary`,
+  `find_boundaries`, `drag_point`, `apply_drag`. 10 unit tests incl. real
+  Explorer geometry. `mod splitter;` added to `main.rs`.
+- `winhint/src/scanner.rs` — `collect_panes(hwnd)` + `pane_walk`; new
+  `PANE_MIN_SIZE` const. Plus the `--resizables` diagnostic (`[T]`/`[S]`/`[P]`).
+- `winhint/src/click.rs` — `drag(from, to)` press→move→release; refactored
+  `input_at`/`normalize` helpers.
+
+All compiles clean; **30 unit tests pass**. `collect_panes`/`pane_walk`/`drag`
+show expected `dead_code` warnings until app.rs wires them.
 
 ## 2. Current state of in-progress work
 
-Nothing in-progress. All code builds and is unit-tested. The earlier freeze-based Search/HintPick design (`frozen`/`code`/`HintMatch`/`filter_indices`/`top_match`/`visible_indices`) was fully removed and replaced.
+Nothing half-done. The three foundation pieces are complete and tested but not
+yet called by anything. `app.rs` and `overlay.rs` are unchanged from the
+(working) window-resize feature — splitter handles do not exist at runtime yet.
 
-## 3. Next steps — ordered and specific
+## 3. Next steps — ordered
 
-1. **Human interactive test (only unverified part — can't automate real CapsLock + observing a real click).** Run `.\winhint\target\debug\winhint.exe --debug`, focus Notepad/File Explorer, then:
-   - Tap CapsLock → palette appears top-center with a "BOTH" badge + floating hint labels on elements.
-   - Type part of a name (e.g. "save") → hint-prefix matches list on top, tapered divider, name matches below; floating labels filter to the union; top name match highlighted (teal).
-   - Complete a hint label (e.g. "ab") → clicks that element. Type + Enter → clicks top name match. Shift+Enter / Shift+hint → right-click (context menu).
-   - Press Tab → badge cycles BOTH→SEARCH→HINTS; verify SEARCH ignores hint completion, HINTS ignores digits/space and only does label picking.
-   - Close + reopen → it should start in the last-used mode (sticky).
-   - CapsLock/Esc cancels; CapsLock never toggles the Caps light; no keys leak to the focused app while active.
-2. Likely tuning knobs if it feels off: palette position/size and `.divider` styling in `overlay.rs shell_html`; whether floating labels should hide in Search mode (currently always shown); substring vs fuzzy/subsequence matching in `name_matches`.
-3. Then M5 polish (tray icon, config file, scroll mode, DPI edge cases); broaden element coverage (accept InvokePattern/TogglePattern in `scanner.rs`).
+See **`RESIZE_PLAN.md` → "NEXT — integration"**. Summary:
+1. `overlay.rs` — mark/style splitter handles (blue, distinct from window's yellow).
+2. `app.rs` — `ResizeState.splitters`, `ResizeSelection` enum, populate in
+   `enter_resize` via `collect_panes`+`find_boundaries`, labels `i`–`z`, splitter
+   branch in `handle_resize_key`/`handle_resize_nav` (arrows → `click::drag` +
+   `apply_drag`), append splitter handles in `render_resize_state`.
+3. `hotkey.rs` — verify only (no changes expected).
+4. Build, test, live-test on File Explorer (double-tap CapsLock → blue `i` handle
+   on nav/content splitter → type `i` → Left/Right drags it), reviewer subagent,
+   commit after user validates.
 
 ## 4. Decisions made this session
 
-- **Three sticky modes** (Both/Search/Hints) cycled by Tab, replacing the freeze-based two-mode design. "Both" shows both match interpretations at once (hint-prefix top / name-search bottom) — this is how the search-vs-hint ambiguity is resolved: no disambiguation needed, both are shown.
-- **Floating labels kept** in all modes (user: "you don't have to change your design much") — the results list is an *addition* under the search bar, not a replacement. Divider is **horizontal**, tapered (CSS gradient, fades at both ends), only drawn in Both when both sections are non-empty.
-- **Sticky mode**: persists across activations because `App` lives for the whole process and `activate`/`deactivate` clear only `typed`.
-- **Empty buffer**: no top match, no highlight, Enter no-op (reviewer-caught consistency fix).
-- Hook stays minimal (only `GetAsyncKeyState` for Shift + `PostMessage`); all logic in the wndproc on the STA thread.
+Fold splitters into existing resize mode (no new gesture); locate splitters
+geometrically (UIA Transform is a dead end — proven); one press→move→release per
+arrow; update-by-delta (no re-scan); Esc restores window rect only, not splitter
+drags. Full rationale in `RESIZE_PLAN.md`.
 
-## 5. Discoveries
+## 5. Discoveries / gotchas
 
-- **Build lock (not a bug):** `cargo build` fails `Access is denied (os error 5)` if a `winhint.exe` daemon is still running. Fix: `Get-Process winhint | Stop-Process -Force` first.
-- **`scanner.rs` already captures `name`** — lower-cased once at `activate`.
-- JS `slice` vs Rust `chars().count()` for the typed prefix are equal only because labels are ASCII `[a-z]` (latent fragility if labels go non-ASCII; out of scope).
-- `planner`/`reviewer` subagents ARE registered now; used `Plan` for the first design and `reviewer` after each implementation.
+- UIA Transform pattern exposes NO useful inner resize (VS Code: nothing;
+  Explorer panes: `resize=0`). Splitters aren't UIA elements. Pane-edge geometry
+  is the only viable path. VS Code (Electron) has no panes → no splitter handles.
+- `cargo test` does NOT rebuild `winhint.exe`; a running daemon locks it
+  (`Get-Process winhint | Stop-Process -Force` first). Single-instance guard live.
+- Some pane boundaries aren't user-draggable (e.g. ribbon edge) — handle still
+  shows, drag is a harmless no-op. Accepted.
 
-## 6. Verification steps (run first next session)
+## 6. Verification steps (run first)
 
 ```powershell
-Get-Process winhint -ErrorAction SilentlyContinue | Stop-Process -Force
-cargo build --manifest-path winhint/Cargo.toml
-cargo test  --manifest-path winhint/Cargo.toml   # expect 9 passed
-.\winhint\target\debug\winhint.exe --debug       # then the interactive test in step 3.1
+cd winhint
+cargo test splitter   # expect: 10 passed
+cargo test            # expect: 30 passed
+cargo build           # clean (dead_code warnings on collect_panes/pane_walk/drag)
 ```
-Expected: clean build, 9 tests pass, and the 3-mode flow above works.
+Confirm `splitter.rs`, `mod splitter;`, `scanner::collect_panes`, and
+`click::drag` are present (uncommitted).

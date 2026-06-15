@@ -56,6 +56,26 @@ pub struct ListRow {
     pub selected: bool,
 }
 
+/// One resize handle to draw: a single-letter label at a physical-pixel screen
+/// coordinate, and whether it's the currently grabbed handle. `splitter` marks a
+/// pane-boundary handle (labels i+, drawn blue) versus a window handle (a–h,
+/// yellow).
+pub struct ResizeHandleItem {
+    pub label: String,
+    pub x: i32,
+    pub y: i32,
+    pub selected: bool,
+    pub splitter: bool,
+}
+
+/// The resize HUD: the target window's current size and the grabbed handle's
+/// label (if any) so the user can see what an arrow press will move.
+pub struct ResizeHud {
+    pub width: i32,
+    pub height: i32,
+    pub selected_label: Option<String>,
+}
+
 /// Owns the WebView2 composition objects for the overlay window. The COM
 /// handles are kept alive for the struct's lifetime; dropping it tears them down.
 pub struct WebViewOverlay {
@@ -161,6 +181,28 @@ impl WebViewOverlay {
         Ok(())
     }
 
+    /// Replace the rendered UI with the resize view: the eight `handles` over the
+    /// target window's corners/edges, plus a `hud` showing its current size and
+    /// the grabbed handle.
+    pub fn render_resize(&self, handles: &[ResizeHandleItem], hud: &ResizeHud) -> Result<()> {
+        let sel = match &hud.selected_label {
+            Some(l) => format!("\"{}\"", json_escape_str(l)),
+            None => String::from("null"),
+        };
+        let js = format!(
+            "renderResize({{handles:{},w:{},h:{},sel:{}}})",
+            resize_handles_json(handles),
+            hud.width,
+            hud.height,
+            sel,
+        );
+        // SAFETY: ExecuteScript with a no-op completion handler; fire-and-forget.
+        unsafe {
+            let handler = ExecuteScriptCompletedHandler::create(Box::new(|_err, _result| Ok(())));
+            self.webview.ExecuteScript(&HSTRING::from(js), &handler)?;
+        }
+        Ok(())
+    }
 }
 
 /// Escape an arbitrary string for embedding inside a JSON/JS double-quoted
@@ -224,6 +266,28 @@ fn rows_json(rows: &[ListRow]) -> String {
     s
 }
 
+/// Serialize resize handles as `[{l:"A",x:1,y:2,s:0,p:0},...]`. `p` marks a
+/// splitter handle. Labels carry only `[a-z]` plus an orientation glyph (↔/↕),
+/// neither of which needs escaping.
+fn resize_handles_json(items: &[ResizeHandleItem]) -> String {
+    let mut s = String::from("[");
+    for (i, it) in items.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "{{l:\"{}\",x:{},y:{},s:{},p:{}}}",
+            it.label.to_uppercase(),
+            it.x,
+            it.y,
+            it.selected as u8,
+            it.splitter as u8
+        ));
+    }
+    s.push(']');
+    s
+}
+
 /// The static shell page: defines `render(items)` and styling. Coordinates are
 /// physical pixels; the page divides by `devicePixelRatio` so labels land
 /// correctly under any monitor DPI scaling.
@@ -260,6 +324,12 @@ html,body{{margin:0;padding:0;width:100%;height:100%;background:{body_bg};overfl
   padding:1px 7px;border-radius:3px;margin-right:10px;letter-spacing:.5px;}}
 .palette.search .mode{{background:#7aa2ff;}}
 .palette.hints .mode{{background:#ff9500;}}
+.palette.resize{{border-color:#ffd166;}}
+.palette.resize .mode{{background:#ffd166;}}
+.hint.handle{{border-color:#ffd166;color:#ffd166;}}
+.hint.handle.sel{{background:#ffd166;color:#0d1117;border-color:#fff;}}
+.hint.handle.splitter{{border-color:#7aa2ff;color:#7aa2ff;}}
+.hint.handle.splitter.sel{{background:#7aa2ff;color:#0d1117;border-color:#fff;}}
 .hdr .q{{color:#e6edf3;white-space:pre;}}
 .hdr .ph{{color:#6b7681;}}
 .hdr .caret{{color:#00e5cc;}}
@@ -350,6 +420,42 @@ function render(state){{
       s.textContent=h.l.slice(0,t); d.appendChild(s);
       d.appendChild(document.createTextNode(h.l.slice(t)));
     }} else {{ d.textContent=h.l; }}
+    d.style.left=(h.x/dpr)+'px'; d.style.top=(h.y/dpr)+'px';
+    b.appendChild(d);
+  }}
+}}
+function renderResize(state){{
+  const b=document.body; b.innerHTML='';
+  const hs=state.handles||[];
+
+  // --- HUD palette: current size + grabbed handle + legend ---
+  const pal=document.createElement('div'); pal.className='palette resize';
+  const hdr=document.createElement('div'); hdr.className='hdr';
+  const m=document.createElement('span'); m.className='mode';
+  m.textContent='RESIZE'; hdr.appendChild(m);
+  const q=document.createElement('span'); q.className='q';
+  q.textContent=state.w+' × '+state.h+'  '+(state.sel?('['+state.sel+']'):'pick a handle');
+  hdr.appendChild(q);
+  const car=document.createElement('span'); car.className='caret';
+  car.textContent='▌'; hdr.appendChild(car);
+  pal.appendChild(hdr);
+  const lg=document.createElement('div'); lg.className='legend';
+  lg.appendChild(chip(['A','…','H'],'grab'));
+  lg.appendChild(chip(['I','…'],'splitters'));
+  lg.appendChild(chip(['←','↑','↓','→'],'resize'));
+  lg.appendChild(chip(['⇧'],'fine'));
+  lg.appendChild(chip(['↵'],'commit'));
+  lg.appendChild(chip(['esc'],'restore'));
+  lg.appendChild(chip(['caps'],'exit'));
+  pal.appendChild(lg);
+  b.appendChild(pal);
+
+  // --- handle pins over the target window's corners / edge midpoints, plus
+  //     blue splitter handles on shared pane edges ---
+  for(const h of hs){{
+    const d=document.createElement('div');
+    d.className='hint handle'+(h.p?' splitter':'')+(h.s?' sel':'');
+    d.textContent=h.l;
     d.style.left=(h.x/dpr)+'px'; d.style.top=(h.y/dpr)+'px';
     b.appendChild(d);
   }}

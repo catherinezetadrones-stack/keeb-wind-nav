@@ -9,13 +9,20 @@
 //!   winhint --debug      same, but the overlay surface is tinted red for testing
 //!   winhint --scan [n]   scan the foreground window and print results (M1 mode);
 //!                        optional countdown `n` (secs) to focus a target first
+//!   winhint --tree [n]   dump the raw UIA tree of the foreground window
+//!   winhint --resizables [n]
+//!                        list elements that expose the UIA Transform pattern
+//!                        (CanResize/CanMove) — the candidate "levels" for nested
+//!                        resize beyond the top-level window
 
 mod app;
 mod click;
 mod hints;
 mod hotkey;
 mod overlay;
+mod resize;
 mod scanner;
+mod splitter;
 
 use anyhow::Result;
 use windows::core::w;
@@ -37,6 +44,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let scan_only = args.iter().any(|a| a == "--scan");
     let tree = args.iter().any(|a| a == "--tree");
+    let resizables = args.iter().any(|a| a == "--resizables");
     let debug = args.iter().any(|a| a == "--debug");
     let delay: u64 = args.iter().find_map(|a| a.parse::<u64>().ok()).unwrap_or(0);
 
@@ -47,7 +55,7 @@ fn main() -> Result<()> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
 
-    let result = run(scan_only, tree, debug, delay);
+    let result = run(scan_only, tree, resizables, debug, delay);
 
     // SAFETY: matches the CoInitializeEx above on this thread.
     unsafe {
@@ -56,8 +64,8 @@ fn main() -> Result<()> {
     result
 }
 
-fn run(scan_only: bool, tree: bool, debug: bool, delay: u64) -> Result<()> {
-    if scan_only || tree {
+fn run(scan_only: bool, tree: bool, resizables: bool, debug: bool, delay: u64) -> Result<()> {
+    if scan_only || tree || resizables {
         if delay > 0 {
             for n in (1..=delay).rev() {
                 eprintln!("Scanning foreground window in {n}s — focus your target...");
@@ -66,6 +74,10 @@ fn run(scan_only: bool, tree: bool, debug: bool, delay: u64) -> Result<()> {
         }
         if tree {
             scanner::dump_tree()?;
+            return Ok(());
+        }
+        if resizables {
+            scanner::dump_resizables()?;
             return Ok(());
         }
         let hints = scanner::scan_foreground()?;

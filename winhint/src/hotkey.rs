@@ -59,6 +59,9 @@ static RESIZE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// `KBDLLHOOKSTRUCT.time` of the CapsLock-down that entered hint mode, used to
 /// detect a quick second tap (→ resize). Only meaningful while `ACTIVE`.
 static LAST_CAPS_TIME: AtomicU32 = AtomicU32::new(0);
+/// Paused via the tray menu: the hook stays installed but routes nothing (all
+/// keys pass through to the focused app) except the global quit chord.
+static PAUSED: AtomicBool = AtomicBool::new(false);
 
 /// Install the keyboard hook on a dedicated thread, posting intents to `hwnd`.
 ///
@@ -140,6 +143,17 @@ pub fn set_resize_active(resize: bool) {
     RESIZE_ACTIVE.store(resize, Ordering::Relaxed);
 }
 
+/// Pause or resume the hook from the tray menu. While paused, every keystroke
+/// passes through to the focused app (only Ctrl+Alt+Q stays live).
+pub fn set_paused(paused: bool) {
+    PAUSED.store(paused, Ordering::Relaxed);
+}
+
+/// Is the hook currently paused? (Drives the tray menu's Pause/Resume label.)
+pub fn is_paused() -> bool {
+    PAUSED.load(Ordering::Relaxed)
+}
+
 /// Enable per-key logging to stderr (for diagnosing the hook).
 pub fn set_debug(debug: bool) {
     DEBUG.store(debug, Ordering::Relaxed);
@@ -208,7 +222,15 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 
         let hwnd = HWND(HOOK_TARGET.load(Ordering::Relaxed) as *mut _);
         if !hwnd.0.is_null() {
-            if !active {
+            if PAUSED.load(Ordering::Relaxed) {
+                // Paused via the tray menu: route nothing — every keystroke
+                // passes through to the focused app — except the global quit
+                // chord, which must always work so the daemon can be exited.
+                if is_down && vk == VK_Q && ctrl_alt_held() {
+                    post(hwnd, WM_APP_QUIT, 0, 0);
+                    return LRESULT(1);
+                }
+            } else if !active {
                 // --- Idle: CapsLock activates; Ctrl+Alt+Q quits. ---
                 if is_down {
                     if vk == VK_CAPITAL.0 as u32 {

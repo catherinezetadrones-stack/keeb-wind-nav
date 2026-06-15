@@ -7,6 +7,9 @@
 # Claude Code runtime lock
 .claude/scheduled_tasks.lock
 
+# Claude Code machine-local settings (permission allowlist, local paths) — not shared
+.claude/settings.local.json
+
 # graphify generated knowledge-graph output
 graphify-out/
 

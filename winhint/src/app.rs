@@ -18,8 +18,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, LoadCursorW, PostQuitMessage, RegisterClassW, SetWindowPos, ShowWindow,
     TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WM_APP, WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
+    WM_RBUTTONUP, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::click;
@@ -29,6 +30,7 @@ use crate::overlay::{ListRow, RenderItem, ResizeHandleItem, ResizeHud, WebViewOv
 use crate::resize::{self, Handle};
 use crate::scanner;
 use crate::splitter::{self, Boundary};
+use crate::tray;
 
 /// Hotkey pressed → enter hint mode.
 pub const WM_APP_SHOW: u32 = WM_APP + 1;
@@ -53,6 +55,9 @@ pub const WM_APP_RESIZE: u32 = WM_APP + 8;
 /// (wparam: 0 = left, 1 = right; lparam bit0 = Shift → fine 1px step). Resize
 /// mode only; ignored in hint mode.
 pub const WM_APP_NAV_H: u32 = WM_APP + 9;
+/// Tray-icon callback (`Shell_NotifyIcon`): the mouse message is in `lparam`
+/// (e.g. `WM_RBUTTONUP` → show the context menu). Posted by the shell.
+pub const WM_APP_TRAY: u32 = WM_APP + 10;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WinHintOverlay");
 
@@ -203,12 +208,18 @@ pub fn run(debug: bool) -> Result<()> {
 
         hotkey::set_debug(debug);
         hotkey::install(hwnd)?;
+        // Tray icon is best-effort: a failure (e.g. a session with no shell tray)
+        // must not stop the daemon, which still works via the keyboard hook.
+        if let Err(e) = tray::add(hwnd) {
+            eprintln!("[winhint] tray icon unavailable: {e}");
+        }
         eprintln!(
             "WinHint running — tap CapsLock to activate · type to search/hint · ↑/↓ select · \
              Enter clicks the selection (Shift+Enter = right-click) · Tab cycles \
              Both/Search/Hints · double-tap CapsLock to resize the window (type a–h to grab a \
              handle · arrows resize, Shift = fine · Enter commits · Esc restores) · \
-             CapsLock/Esc to cancel · Ctrl+Alt+Q to quit."
+             CapsLock/Esc to cancel · right-click the tray icon to pause/resume or \
+             quit · Ctrl+Alt+Q to quit."
         );
         if debug {
             eprintln!("[debug] key logging on — press some keys; each should print a [hook] line.");
@@ -216,6 +227,8 @@ pub fn run(debug: bool) -> Result<()> {
 
         run_message_loop();
 
+        // Remove the tray icon so none lingers, then stop the hook thread.
+        tray::remove(hwnd);
         hotkey::uninstall();
     }
     Ok(())
@@ -350,6 +363,42 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     deactivate(app, hwnd);
                 }
             });
+            LRESULT(0)
+        }
+        WM_APP_TRAY => {
+            // The shell packs the triggering mouse message into lparam. Show the
+            // context menu on a right-click; left-click is currently a no-op.
+            // (Left-click is intentionally a no-op for now — future follow-up.)
+            let mouse = (lparam.0 as u32) & 0xFFFF;
+            if mouse == WM_RBUTTONUP || mouse == WM_CONTEXTMENU {
+                tray::show_menu(hwnd, hotkey::is_paused());
+            }
+            LRESULT(0)
+        }
+        WM_COMMAND => {
+            // A tray-menu selection: the command id is the low word of wparam.
+            match (wparam.0 as u32) & 0xFFFF {
+                id if id == tray::IDM_PAUSE_RESUME => {
+                    let now_paused = !hotkey::is_paused();
+                    hotkey::set_paused(now_paused);
+                    // Pausing mid-session would strand the overlay: its Esc /
+                    // CapsLock keys now pass straight through, leaving no way to
+                    // dismiss it. So tear down any open session when pausing.
+                    if now_paused {
+                        with_app(|app| {
+                            if matches!(app.state, UiState::Resize(_)) {
+                                exit_resize(app, hwnd, true);
+                            } else if app.is_active() {
+                                deactivate(app, hwnd);
+                            }
+                        });
+                    }
+                }
+                id if id == tray::IDM_QUIT => {
+                    PostQuitMessage(0);
+                }
+                _ => {}
+            }
             LRESULT(0)
         }
         WM_APP_QUIT | WM_DESTROY => {

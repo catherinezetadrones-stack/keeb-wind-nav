@@ -22,6 +22,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",   # DXGI enums
     "Win32_Graphics_DirectComposition", # IDCompositionDevice/Target/Visual
     "Win32_UI_Input_KeyboardAndMouse",  # SendInput, GetAsyncKeyState, VK_* (hook + click)
+    "Win32_UI_Shell",                   # Shell_NotifyIconW, NOTIFYICONDATAW, NIM_* (tray icon)
 ] }
 webview2-com = "0.39"
 anyhow = "1.0.102"

@@ -23,6 +23,7 @@ mod overlay;
 mod resize;
 mod scanner;
 mod splitter;
+mod tray;
 
 use anyhow::Result;
 use windows::core::w;

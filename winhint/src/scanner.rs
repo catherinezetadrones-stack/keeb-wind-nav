@@ -21,12 +21,13 @@ use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
-    UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
-    UIA_DataItemControlTypeId, UIA_EditControlTypeId, UIA_HeaderItemControlTypeId,
-    UIA_HyperlinkControlTypeId, UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId,
-    UIA_RadioButtonControlTypeId, UIA_SplitButtonControlTypeId, UIA_TabItemControlTypeId,
-    UIA_TreeItemControlTypeId, UIA_CONTROLTYPE_ID,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTransformPattern,
+    IUIAutomationTreeWalker, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
+    UIA_ComboBoxControlTypeId, UIA_DataItemControlTypeId, UIA_EditControlTypeId,
+    UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuItemControlTypeId, UIA_PaneControlTypeId, UIA_RadioButtonControlTypeId,
+    UIA_SeparatorControlTypeId, UIA_SplitButtonControlTypeId, UIA_TabItemControlTypeId,
+    UIA_TransformPatternId, UIA_TreeItemControlTypeId, UIA_CONTROLTYPE_ID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowRect,
@@ -149,11 +150,227 @@ unsafe fn dump_walk(
     }
 }
 
+/// Smallest pane (each axis, physical px) collected as a splitter-adjacency
+/// candidate — filters toolbars/labels that report as panes. Matches
+/// `splitter::MIN_PANE_SIZE`.
+const PANE_MIN_SIZE: i32 = 80;
+
+/// A divider thinner than this (on its short axis, physical px) and at least
+/// `SPLITTER_MIN_LONG` on its long axis is treated as a candidate splitter bar.
+const SPLITTER_MAX_THIN: i32 = 10;
+/// Minimum long-axis length (physical px) for a thin bar to count as a splitter
+/// — filters out tiny separators (e.g. menu dividers) that aren't drag targets.
+const SPLITTER_MIN_LONG: i32 = 40;
+
+/// DIAGNOSTIC: dump the foreground window's candidate resize targets in two
+/// categories:
+///
+/// 1. **`[T]` Transform-pattern** elements (`CanResize`/`CanMove`) — the
+///    "proper" resizable levels. Proven sparse in practice (Electron apps expose
+///    nothing; native apps often only the top-level window).
+/// 2. **`[S]` splitter candidates** — UIA `Separator` controls and thin divider
+///    bars (short axis ≤ 10px, long axis ≥ 40px). These are the drag targets for
+///    *simulated splitter-drag* pane resize:
+///    `↔` = vertical bar dragged horizontally; `↕` = horizontal bar dragged
+///    vertically. Position is the bar center in physical screen pixels.
+///
+/// Run `winhint --resizables [n]` (optional countdown to focus a target) to see
+/// what an app exposes before wiring it into resize mode.
+pub fn dump_resizables() -> Result<()> {
+    // SAFETY: standard UIA calls; COM is initialized by the caller.
+    unsafe {
+        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)?;
+        let walker = automation.RawViewWalker()?;
+        let hwnd = app_window();
+        if hwnd.0.is_null() {
+            println!("[resizables] no app window to scan");
+            return Ok(());
+        }
+        let root = automation.ElementFromHandle(hwnd)?;
+        let mut transforms = 0usize;
+        let mut splitters = 0usize;
+        let mut visited = 0usize;
+        resizable_walk(&walker, &root, 0, &mut transforms, &mut splitters, &mut visited);
+        println!(
+            "[resizables] {transforms} transform-capable + {splitters} splitter candidate(s) \
+             across {visited} node(s)"
+        );
+        Ok(())
+    }
+}
+
+/// Recursive helper for `dump_resizables`. Prints Transform-capable elements
+/// (`[T]`) and splitter candidates (`[S]`), tallying each.
+unsafe fn resizable_walk(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+    depth: usize,
+    transforms: &mut usize,
+    splitters: &mut usize,
+    visited: &mut usize,
+) {
+    if depth > 30 || *visited >= 5000 {
+        return;
+    }
+    *visited += 1;
+
+    let ct = element.CurrentControlType().map(|c| c.0).unwrap_or(0);
+    let rect = element.CurrentBoundingRectangle().unwrap_or_default();
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    let name = element
+        .CurrentName()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let name_short: String = name.chars().take(50).collect();
+    let indent = depth.min(20);
+
+    if let Some((can_resize, can_move)) = transform_caps(element) {
+        if can_resize || can_move {
+            *transforms += 1;
+            println!(
+                "{depth:>3} {:indent$}[T] ct={ct} resize={} move={} {w}x{h}  {name_short}",
+                "",
+                can_resize as u8,
+                can_move as u8,
+            );
+        }
+    }
+
+    // Panes are the containers whose shared edges form the (UIA-invisible)
+    // splitters we'll drag geometrically — print their full rect for adjacency
+    // analysis. Skip tiny ones (toolbars/labels masquerading as panes).
+    if ct == UIA_PaneControlTypeId.0 && w >= PANE_MIN_SIZE && h >= PANE_MIN_SIZE {
+        println!(
+            "{depth:>3} {:indent$}[P] ct={ct} l={} t={} r={} b={} ({w}x{h})  {name_short}",
+            "", rect.left, rect.top, rect.right, rect.bottom,
+        );
+    }
+
+    if let Some(orient) = splitter_orientation(ct, w, h) {
+        *splitters += 1;
+        let cx = (rect.left + rect.right) / 2;
+        let cy = (rect.top + rect.bottom) / 2;
+        println!(
+            "{depth:>3} {:indent$}[S] ct={ct} {orient} {w}x{h} @({cx},{cy})  {name_short}",
+            "",
+        );
+    }
+
+    let mut child = walker.GetFirstChildElement(element);
+    while let Ok(node) = child {
+        if *visited >= 5000 {
+            break;
+        }
+        resizable_walk(walker, &node, depth + 1, transforms, splitters, visited);
+        child = walker.GetNextSiblingElement(&node);
+    }
+}
+
+/// The element's Transform-pattern `(can_resize, can_move)` capabilities, or
+/// `None` if it doesn't support the Transform pattern at all.
+unsafe fn transform_caps(element: &IUIAutomationElement) -> Option<(bool, bool)> {
+    let pattern: IUIAutomationTransformPattern =
+        element.GetCurrentPatternAs(UIA_TransformPatternId).ok()?;
+    let can_resize = pattern.CurrentCanResize().map(|b| b.as_bool()).unwrap_or(false);
+    let can_move = pattern.CurrentCanMove().map(|b| b.as_bool()).unwrap_or(false);
+    Some((can_resize, can_move))
+}
+
+/// Classify an element as a splitter candidate from its control type and size,
+/// returning the drag-orientation arrow, or `None` if it isn't one. A `Separator`
+/// control or a thin bar qualifies; orientation follows the long axis (`↕` =
+/// wide+short horizontal bar dragged vertically; `↔` = tall+narrow vertical bar
+/// dragged horizontally).
+fn splitter_orientation(ct: i32, w: i32, h: i32) -> Option<&'static str> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let is_separator = ct == UIA_SeparatorControlTypeId.0;
+    let thin_bar = w.min(h) <= SPLITTER_MAX_THIN && w.max(h) >= SPLITTER_MIN_LONG;
+    if !is_separator && !thin_bar {
+        return None;
+    }
+    if w >= h {
+        Some("↕") // horizontal bar → dragged vertically
+    } else {
+        Some("↔") // vertical bar → dragged horizontally
+    }
+}
+
 /// Last foreground window that looked like a real application. Used as a
 /// fallback when the current foreground is the shell/desktop/taskbar (which
 /// happens right after clicking a tray icon), so re-triggering still targets the
 /// app the user was working in rather than finding only taskbar elements.
 static LAST_APP_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// The window a resize would target: the same app window the scan uses, or
+/// `None` when there is no real app window to act on (e.g. only the shell is
+/// up). `app.rs` uses this to know which window's rect to manipulate.
+pub fn target_window() -> Option<HWND> {
+    // SAFETY: `app_window` only reads foreground/class info; no state escapes.
+    let hwnd = unsafe { app_window() };
+    if hwnd.0.is_null() {
+        None
+    } else {
+        Some(hwnd)
+    }
+}
+
+/// Collect the bounding rects of every sizeable `Pane` under `hwnd`, in physical
+/// screen pixels. These are the containers whose shared edges
+/// (`splitter::find_boundaries`) form the draggable pane splitters. Tiny panes
+/// (below `PANE_MIN_SIZE`) are skipped. A null HWND or UIA failure yields an
+/// empty list rather than an error so resize mode degrades gracefully.
+pub fn collect_panes(hwnd: HWND) -> Result<Vec<RECT>> {
+    if hwnd.0.is_null() {
+        return Ok(Vec::new());
+    }
+    // SAFETY: standard UIA calls; COM is initialized by the caller's thread.
+    unsafe {
+        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)?;
+        // RawViewWalker: panes of interest may be hidden from the control view
+        // (the diagnostic found Explorer's nav/content panes only via the raw view).
+        let walker = automation.RawViewWalker()?;
+        let root = automation.ElementFromHandle(hwnd)?;
+        let mut out: Vec<RECT> = Vec::new();
+        let mut visited = 0usize;
+        pane_walk(&walker, &root, 0, &mut out, &mut visited);
+        Ok(out)
+    }
+}
+
+/// Recursive helper for `collect_panes`: push every sizeable pane's rect into `out`.
+unsafe fn pane_walk(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+    depth: usize,
+    out: &mut Vec<RECT>,
+    visited: &mut usize,
+) {
+    if depth > 30 || *visited >= 5000 {
+        return;
+    }
+    *visited += 1;
+
+    if let Ok(ct) = element.CurrentControlType() {
+        if ct.0 == UIA_PaneControlTypeId.0 {
+            if let Ok(r) = element.CurrentBoundingRectangle() {
+                if r.right - r.left >= PANE_MIN_SIZE && r.bottom - r.top >= PANE_MIN_SIZE {
+                    out.push(r);
+                }
+            }
+        }
+    }
+
+    let mut child = walker.GetFirstChildElement(element);
+    while let Ok(node) = child {
+        if *visited >= 5000 {
+            break;
+        }
+        pane_walk(walker, &node, depth + 1, out, visited);
+        child = walker.GetNextSiblingElement(&node);
+    }
+}
 
 /// Choose the application window to scan: the current foreground if it's a real
 /// app window (which we then remember), else the last remembered one.

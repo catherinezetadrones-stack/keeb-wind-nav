@@ -11,22 +11,24 @@ use std::cell::RefCell;
 
 use anyhow::Result;
 use windows::core::w;
-use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetSystemMetrics, LoadCursorW,
-    PostQuitMessage, RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST,
-    IDC_ARROW, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WM_APP,
-    WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetSystemMetrics,
+    GetWindowRect, LoadCursorW, PostQuitMessage, RegisterClassW, SetWindowPos, ShowWindow,
+    TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE, WM_APP, WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::click;
 use crate::hints;
 use crate::hotkey;
-use crate::overlay::{ListRow, RenderItem, WebViewOverlay};
+use crate::overlay::{ListRow, RenderItem, ResizeHandleItem, ResizeHud, WebViewOverlay};
+use crate::resize::{self, Handle};
 use crate::scanner;
+use crate::splitter::{self, Boundary};
 
 /// Hotkey pressed → enter hint mode.
 pub const WM_APP_SHOW: u32 = WM_APP + 1;
@@ -41,8 +43,16 @@ pub const WM_APP_QUIT: u32 = WM_APP + 4;
 pub const WM_APP_CONFIRM: u32 = WM_APP + 5;
 /// Tab pressed → cycle the matching mode.
 pub const WM_APP_TAB: u32 = WM_APP + 6;
-/// Arrow Up/Down → move the list selection (wparam: 0 = up, 1 = down).
+/// Arrow Up/Down → move the list selection, or move a resize handle's
+/// horizontal-spanning edge vertically (wparam: 0 = up, 1 = down; lparam bit0 =
+/// Shift → fine 1px step in resize mode).
 pub const WM_APP_NAV: u32 = WM_APP + 7;
+/// Double-tap CapsLock (within the hook's window) → enter resize mode.
+pub const WM_APP_RESIZE: u32 = WM_APP + 8;
+/// Arrow Left/Right → move a resize handle's vertical-spanning edge horizontally
+/// (wparam: 0 = left, 1 = right; lparam bit0 = Shift → fine 1px step). Resize
+/// mode only; ignored in hint mode.
+pub const WM_APP_NAV_H: u32 = WM_APP + 9;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WinHintOverlay");
 
@@ -107,11 +117,46 @@ struct HintEntry {
     name: String,
 }
 
+/// What an arrow press will move in resize mode: nothing yet, one of the eight
+/// window handles, or a pane splitter (by index into `ResizeState::splitters`).
+enum ResizeSelection {
+    None,
+    Window(Handle),
+    Splitter(usize),
+}
+
+/// State for an active resize session: which window is being resized, its rect
+/// when we started (for Esc restore), its live rect, the pane splitters detected
+/// on entry, and what's currently grabbed.
+struct ResizeState {
+    /// The window being resized.
+    target: HWND,
+    /// Window rect when resize mode was entered — restored on Esc.
+    orig_rect: RECT,
+    /// Live rect, updated as the user drags edges with the arrow keys.
+    current_rect: RECT,
+    /// Pane splitters found on entry; their handles are labeled i, j, k….
+    /// `coord` is updated optimistically after each drag (no re-scan).
+    splitters: Vec<Boundary>,
+    /// The grabbed window handle or splitter, or `None` until a label is typed.
+    selection: ResizeSelection,
+}
+
+/// The overlay's top-level mode. Hint state (`typed`/`mode`/`selected`/`hints`)
+/// lives on `App` and is only meaningful while `Hints`; resize state is
+/// self-contained in the `Resize` variant.
+enum UiState {
+    Idle,
+    Hints,
+    Resize(ResizeState),
+}
+
 /// Shared app state, accessed only from the app thread.
 struct App {
     overlay: WebViewOverlay,
-    active: bool,
-    /// The single keystroke buffer; interpreted per `mode`.
+    /// Which top-level mode the overlay is in.
+    state: UiState,
+    /// The single keystroke buffer; interpreted per `mode` (hint mode only).
     typed: String,
     /// Current matching mode (sticky across activations).
     mode: Mode,
@@ -119,6 +164,13 @@ struct App {
     /// the result set changes; moved by arrow keys (wrapping top↔bottom).
     selected: usize,
     hints: Vec<HintEntry>,
+}
+
+impl App {
+    /// Is the overlay showing anything (hint or resize)? Used to guard re-entry.
+    fn is_active(&self) -> bool {
+        !matches!(self.state, UiState::Idle)
+    }
 }
 
 thread_local! {
@@ -141,7 +193,7 @@ pub fn run(debug: bool) -> Result<()> {
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
                 overlay,
-                active: false,
+                state: UiState::Idle,
                 typed: String::new(),
                 mode: Mode::Both,
                 selected: 0,
@@ -154,7 +206,9 @@ pub fn run(debug: bool) -> Result<()> {
         eprintln!(
             "WinHint running — tap CapsLock to activate · type to search/hint · ↑/↓ select · \
              Enter clicks the selection (Shift+Enter = right-click) · Tab cycles \
-             Both/Search/Hints · CapsLock/Esc to cancel · Ctrl+Alt+Q to quit."
+             Both/Search/Hints · double-tap CapsLock to resize the window (type a–h to grab a \
+             handle · arrows resize, Shift = fine · Enter commits · Esc restores) · \
+             CapsLock/Esc to cancel · Ctrl+Alt+Q to quit."
         );
         if debug {
             eprintln!("[debug] key logging on — press some keys; each should print a [hook] line.");
@@ -229,28 +283,73 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             LRESULT(0)
         }
+        WM_APP_RESIZE => {
+            with_app(|app| enter_resize(app, hwnd));
+            LRESULT(0)
+        }
         WM_APP_KEY => {
             let vk = wparam.0 as u32;
             let shift = (lparam.0 & 1) != 0;
-            with_app(|app| handle_key(app, hwnd, vk, shift));
+            with_app(|app| {
+                if matches!(app.state, UiState::Resize(_)) {
+                    handle_resize_key(app, vk);
+                } else if matches!(app.state, UiState::Hints) {
+                    handle_key(app, hwnd, vk, shift);
+                }
+            });
             LRESULT(0)
         }
         WM_APP_CONFIRM => {
             let shift = (lparam.0 & 1) != 0;
-            with_app(|app| handle_confirm(app, hwnd, shift));
+            with_app(|app| {
+                if matches!(app.state, UiState::Resize(_)) {
+                    exit_resize(app, hwnd, false); // commit: keep current rect
+                } else if matches!(app.state, UiState::Hints) {
+                    handle_confirm(app, hwnd, shift);
+                }
+            });
             LRESULT(0)
         }
         WM_APP_TAB => {
-            with_app(|app| handle_tab(app));
+            with_app(|app| {
+                if matches!(app.state, UiState::Hints) {
+                    handle_tab(app);
+                }
+            });
             LRESULT(0)
         }
         WM_APP_NAV => {
             let down = wparam.0 == 1;
-            with_app(|app| handle_nav(app, down));
+            let shift = (lparam.0 & 1) != 0;
+            with_app(|app| {
+                if matches!(app.state, UiState::Resize(_)) {
+                    let step = resize_step(shift);
+                    handle_resize_nav(app, hwnd, 0, if down { step } else { -step });
+                } else if matches!(app.state, UiState::Hints) {
+                    handle_nav(app, down);
+                }
+            });
+            LRESULT(0)
+        }
+        WM_APP_NAV_H => {
+            let right = wparam.0 == 1;
+            let shift = (lparam.0 & 1) != 0;
+            with_app(|app| {
+                if matches!(app.state, UiState::Resize(_)) {
+                    let step = resize_step(shift);
+                    handle_resize_nav(app, hwnd, if right { step } else { -step }, 0);
+                }
+            });
             LRESULT(0)
         }
         WM_APP_CANCEL => {
-            with_app(|app| deactivate(app, hwnd));
+            with_app(|app| {
+                if matches!(app.state, UiState::Resize(_)) {
+                    exit_resize(app, hwnd, true); // restore the original rect
+                } else {
+                    deactivate(app, hwnd);
+                }
+            });
             LRESULT(0)
         }
         WM_APP_QUIT | WM_DESTROY => {
@@ -272,7 +371,7 @@ fn with_app(f: impl FnOnce(&mut App)) {
 
 /// Enter hint mode: scan the foreground window, show labeled hints.
 unsafe fn activate(app: &mut App, hwnd: HWND) -> Result<()> {
-    if app.active {
+    if app.is_active() {
         return Ok(());
     }
 
@@ -302,11 +401,20 @@ unsafe fn activate(app: &mut App, hwnd: HWND) -> Result<()> {
 
     render_state(app);
     app.overlay.set_visible(true)?;
-    // Re-assert top-of-band z-order every activation (not just ShowWindow):
-    // interacting with the shell — e.g. clicking a tray icon, which opens a
-    // topmost flyout — can leave our overlay buried in the topmost band, so a
-    // plain show would activate but stay invisible. HWND_TOPMOST + SWP_SHOWWINDOW
-    // both shows it and raises it to the front without stealing focus.
+    reassert_topmost(hwnd);
+    app.state = UiState::Hints;
+    hotkey::set_active(true);
+    Ok(())
+}
+
+/// Re-assert top-of-band z-order and show the overlay without stealing focus.
+///
+/// Needed not just on first show: interacting with the shell — e.g. clicking a
+/// tray icon, which opens a topmost flyout — can leave our overlay buried in the
+/// topmost band, and a resize `SetWindowPos` on the target can raise the target
+/// over us. `HWND_TOPMOST` + `SWP_SHOWWINDOW` raises us to the front (foreground
+/// app keeps focus thanks to `SWP_NOACTIVATE`).
+unsafe fn reassert_topmost(hwnd: HWND) {
     let _ = SetWindowPos(
         hwnd,
         Some(HWND_TOPMOST),
@@ -316,9 +424,6 @@ unsafe fn activate(app: &mut App, hwnd: HWND) -> Result<()> {
         0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
     );
-    app.active = true;
-    hotkey::set_active(true);
-    Ok(())
 }
 
 /// Map a forwarded virtual-key code to the character it contributes to a text
@@ -564,8 +669,307 @@ fn exact_hint(hints: &[HintEntry], typed: &str) -> Option<usize> {
 /// Leave hint mode and hide the overlay. `mode` is intentionally preserved
 /// (sticky across activations); only the keystroke buffer is cleared.
 unsafe fn deactivate(app: &mut App, hwnd: HWND) {
-    app.active = false;
+    app.state = UiState::Idle;
     app.typed.clear();
+    hotkey::set_active(false);
+    let _ = app.overlay.set_visible(false);
+    let _ = ShowWindow(hwnd, SW_HIDE);
+}
+
+/// Step size for one arrow press while resizing: a coarse 8px, or a fine 1px
+/// when Shift is held.
+fn resize_step(shift: bool) -> i32 {
+    if shift {
+        1
+    } else {
+        8
+    }
+}
+
+/// Most splitter handles we label: `'i'..='z'` is 18 letters (window handles
+/// take `'a'..='h'`). Extra splitters past this are dropped.
+const MAX_SPLITTERS: usize = 18;
+
+/// The splitter index that label `c` (`'i'..='z'`) grabs, or `None` if `c` is
+/// out of range or beyond the `count` of detected splitters.
+fn splitter_from_label(c: char, count: usize) -> Option<usize> {
+    if !('i'..='z').contains(&c) {
+        return None;
+    }
+    let idx = (c as u8 - b'i') as usize;
+    (idx < count).then_some(idx)
+}
+
+/// The single-letter label for splitter index `idx` (`0 → 'i'`, `1 → 'j'`, …),
+/// the inverse of `splitter_from_label`.
+fn splitter_label(idx: usize) -> char {
+    (b'i' + idx as u8) as char
+}
+
+/// The orientation glyph shown on a splitter handle: a `Vertical` bar is dragged
+/// horizontally (`↔`), a `Horizontal` bar vertically (`↕`).
+fn orientation_glyph(o: splitter::Orientation) -> &'static str {
+    match o {
+        splitter::Orientation::Vertical => "↔",
+        splitter::Orientation::Horizontal => "↕",
+    }
+}
+
+/// The handle that label `c` (`'a'..='h'`) grabs, by its index in
+/// `Handle::all()` — the same order the labels are assigned in. `None` for any
+/// other character.
+fn handle_from_label(c: char) -> Option<Handle> {
+    if !('a'..='h').contains(&c) {
+        return None;
+    }
+    let i = (c as u8 - b'a') as usize;
+    Handle::all().get(i).copied()
+}
+
+/// The single-letter label for `handle`, the inverse of `handle_from_label`.
+fn label_for_handle(handle: Handle) -> char {
+    let i = Handle::all()
+        .iter()
+        .position(|&h| h == handle)
+        .expect("Handle::all() contains every handle");
+    (b'a' + i as u8) as char
+}
+
+/// Enter resize mode for the tracked app window. Only valid from hint mode; if
+/// there is no target window or its rect can't be read, stay in hint mode.
+unsafe fn enter_resize(app: &mut App, hwnd: HWND) {
+    if !matches!(app.state, UiState::Hints) {
+        return;
+    }
+    let Some(target) = scanner::target_window() else {
+        eprintln!("[winhint] resize: no target window — staying in hint mode");
+        return;
+    };
+    let mut rect = RECT::default();
+    // SAFETY: target is a live top-level HWND from the scanner; out-param rect.
+    if GetWindowRect(target, &mut rect).is_err() {
+        eprintln!("[winhint] resize: GetWindowRect failed — staying in hint mode");
+        return;
+    }
+
+    // Detect pane splitters (shared edges of adjacent panes). Degrades to an
+    // empty list — window resize still works — when the app exposes no panes.
+    let panes = scanner::collect_panes(target).unwrap_or_default();
+    let mut splitters = splitter::find_boundaries(&panes);
+    if splitters.len() > MAX_SPLITTERS {
+        eprintln!(
+            "[winhint] resize: {} splitters found, labeling the first {}",
+            splitters.len(),
+            MAX_SPLITTERS
+        );
+        splitters.truncate(MAX_SPLITTERS);
+    }
+
+    app.typed.clear();
+    app.state = UiState::Resize(ResizeState {
+        target,
+        orig_rect: rect,
+        current_rect: rect,
+        splitters,
+        selection: ResizeSelection::None,
+    });
+    hotkey::set_resize_active(true);
+    render_resize_state(app);
+    // The overlay is already visible (we came from hint mode); keep it on top.
+    reassert_topmost(hwnd);
+}
+
+/// Handle a forwarded text key in resize mode: a window-handle label (a–h) grabs
+/// that handle; a splitter label (i–z, within range) grabs that splitter;
+/// anything else is ignored.
+fn handle_resize_key(app: &mut App, vk: u32) {
+    let Some(c) = text_char(vk) else {
+        return;
+    };
+    let UiState::Resize(rs) = &mut app.state else {
+        return;
+    };
+    if let Some(handle) = handle_from_label(c) {
+        rs.selection = ResizeSelection::Window(handle);
+    } else if let Some(idx) = splitter_from_label(c, rs.splitters.len()) {
+        rs.selection = ResizeSelection::Splitter(idx);
+    } else {
+        return; // unbound label — leave the current selection untouched
+    }
+    render_resize_state(app);
+}
+
+/// A side effect computed under the `ResizeState` borrow, then performed once the
+/// borrow is released: resize the window, or drag a splitter. Splitting it out
+/// this way avoids holding a `&mut` to `app.state` across `exit_resize`/render.
+enum NavAction {
+    /// Nothing grabbed, or an arrow orthogonal to the grabbed splitter.
+    None,
+    /// Apply `rect` to the target window (the live rect is already updated).
+    Window { target: HWND, rect: RECT },
+    /// Drag a splitter from `from` to `to` (the boundary is already updated).
+    Splitter { from: (i32, i32), to: (i32, i32) },
+}
+
+/// Move whatever is grabbed by `(dx, dy)`: a window handle resizes the target
+/// live; a splitter is dragged via a simulated mouse drag. No-op until something
+/// is grabbed (or for an arrow orthogonal to the grabbed splitter). If the target
+/// window has gone away (`SetWindowPos` fails), exit to idle without restoring.
+unsafe fn handle_resize_nav(app: &mut App, hwnd: HWND, dx: i32, dy: i32) {
+    let action = {
+        let UiState::Resize(rs) = &mut app.state else {
+            return;
+        };
+        match rs.selection {
+            ResizeSelection::None => NavAction::None,
+            ResizeSelection::Window(handle) => {
+                let new = resize::apply_handle_move(
+                    rs.current_rect,
+                    handle,
+                    dx,
+                    dy,
+                    resize::MIN_WIDTH,
+                    resize::MIN_HEIGHT,
+                );
+                rs.current_rect = new;
+                NavAction::Window {
+                    target: rs.target,
+                    rect: new,
+                }
+            }
+            ResizeSelection::Splitter(idx) => {
+                let b = rs.splitters[idx];
+                // A vertical bar only responds to a horizontal arrow (dx), a
+                // horizontal bar only to a vertical arrow (dy); the other axis is
+                // a no-op rather than a sideways drag.
+                let moves = match b.orientation {
+                    splitter::Orientation::Vertical => dx != 0,
+                    splitter::Orientation::Horizontal => dy != 0,
+                };
+                if !moves {
+                    NavAction::None
+                } else {
+                    let from = splitter::drag_point(&b);
+                    let to = (from.0 + dx, from.1 + dy);
+                    rs.splitters[idx] = splitter::apply_drag(&b, dx, dy);
+                    NavAction::Splitter { from, to }
+                }
+            }
+        }
+    };
+
+    match action {
+        NavAction::None => return,
+        NavAction::Window { target, rect } => {
+            let w = rect.right - rect.left;
+            let h = rect.bottom - rect.top;
+            // SAFETY: move/size a live top-level window without activating or reordering.
+            if SetWindowPos(
+                target,
+                None,
+                rect.left,
+                rect.top,
+                w,
+                h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .is_err()
+            {
+                eprintln!("[winhint] resize: target window gone — exiting");
+                exit_resize(app, hwnd, false);
+                return;
+            }
+        }
+        NavAction::Splitter { from, to } => {
+            // Simulated mouse drag on the shared pane edge. Harmless even if the
+            // boundary isn't user-draggable — nothing moves.
+            click::drag(from, to);
+        }
+    }
+    // The target move / drag can shuffle z-order; keep our overlay in front.
+    reassert_topmost(hwnd);
+    render_resize_state(app);
+}
+
+/// Push the resize view to the overlay: the eight window-handle pins (yellow),
+/// the blue splitter handles, and the size HUD.
+fn render_resize_state(app: &App) {
+    let UiState::Resize(rs) = &app.state else {
+        return;
+    };
+    let positions = resize::handle_positions(rs.current_rect);
+    let mut handles: Vec<ResizeHandleItem> = positions
+        .iter()
+        .map(|&(handle, x, y)| ResizeHandleItem {
+            label: label_for_handle(handle).to_string(),
+            x,
+            y,
+            selected: matches!(rs.selection, ResizeSelection::Window(h) if h == handle),
+            splitter: false,
+        })
+        .collect();
+
+    // Append one blue handle per detected splitter (labels i, j, k…), each
+    // carrying an orientation glyph showing which way the arrows drag it.
+    for (idx, b) in rs.splitters.iter().enumerate() {
+        let (x, y) = splitter::drag_point(b);
+        handles.push(ResizeHandleItem {
+            label: format!("{}{}", splitter_label(idx), orientation_glyph(b.orientation)),
+            x,
+            y,
+            selected: matches!(rs.selection, ResizeSelection::Splitter(i) if i == idx),
+            splitter: true,
+        });
+    }
+
+    let hud = ResizeHud {
+        width: rs.current_rect.right - rs.current_rect.left,
+        height: rs.current_rect.bottom - rs.current_rect.top,
+        selected_label: selected_hud_label(rs),
+    };
+    if let Err(e) = app.overlay.render_resize(&handles, &hud) {
+        eprintln!("[winhint] resize render failed: {e}");
+    }
+}
+
+/// The HUD's "grabbed" label for the current selection: the uppercased window
+/// handle (`A`–`H`), or the splitter label plus its orientation glyph, or `None`.
+fn selected_hud_label(rs: &ResizeState) -> Option<String> {
+    match rs.selection {
+        ResizeSelection::None => None,
+        ResizeSelection::Window(h) => Some(label_for_handle(h).to_uppercase().to_string()),
+        ResizeSelection::Splitter(idx) => {
+            let glyph = orientation_glyph(rs.splitters[idx].orientation);
+            Some(format!(
+                "{}{}",
+                splitter_label(idx).to_ascii_uppercase(),
+                glyph
+            ))
+        }
+    }
+}
+
+/// Leave resize mode. `restore` (Esc) puts the window back to its `orig_rect`;
+/// otherwise (Enter, or target gone) the current rect is kept.
+unsafe fn exit_resize(app: &mut App, hwnd: HWND, restore: bool) {
+    if restore {
+        if let UiState::Resize(rs) = &app.state {
+            let r = rs.orig_rect;
+            // SAFETY: restore the original geometry; ignore failure (window gone).
+            let _ = SetWindowPos(
+                rs.target,
+                None,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+    app.state = UiState::Idle;
+    app.typed.clear();
+    hotkey::set_resize_active(false);
     hotkey::set_active(false);
     let _ = app.overlay.set_visible(false);
     let _ = ShowWindow(hwnd, SW_HIDE);
@@ -638,5 +1042,59 @@ mod tests {
         assert_eq!(wrap_index(1, 3, false), 0);
         assert_eq!(wrap_index(0, 0, true), 0); // empty list is safe
         assert_eq!(wrap_index(0, 1, true), 0); // single item stays
+    }
+
+    #[test]
+    fn handle_label_maps_to_all_order() {
+        // a–h must map to Handle::all() by index (and back).
+        for (i, h) in Handle::all().iter().enumerate() {
+            let c = (b'a' + i as u8) as char;
+            assert_eq!(handle_from_label(c), Some(*h));
+            assert_eq!(label_for_handle(*h), c);
+        }
+    }
+
+    #[test]
+    fn handle_label_rejects_out_of_range() {
+        assert_eq!(handle_from_label('i'), None); // only 8 handles → a..h
+        assert_eq!(handle_from_label('z'), None);
+        assert_eq!(handle_from_label('A'), None); // uppercase not accepted
+        assert_eq!(handle_from_label('1'), None);
+    }
+
+    #[test]
+    fn resize_step_fine_with_shift() {
+        assert_eq!(resize_step(false), 8); // coarse
+        assert_eq!(resize_step(true), 1); // Shift → fine
+    }
+
+    #[test]
+    fn splitter_label_starts_at_i() {
+        assert_eq!(splitter_label(0), 'i');
+        assert_eq!(splitter_label(1), 'j');
+        assert_eq!(splitter_label(MAX_SPLITTERS - 1), 'z'); // 18 labels → i..=z
+    }
+
+    #[test]
+    fn splitter_from_label_respects_range_and_count() {
+        assert_eq!(splitter_from_label('i', 3), Some(0));
+        assert_eq!(splitter_from_label('k', 3), Some(2));
+        assert_eq!(splitter_from_label('l', 3), None); // within i..z but beyond count
+        assert_eq!(splitter_from_label('h', 3), None); // window-handle range, not a splitter
+        assert_eq!(splitter_from_label('z', MAX_SPLITTERS), Some(17));
+        assert_eq!(splitter_from_label('I', 3), None); // only lowercase is forwarded
+    }
+
+    #[test]
+    fn handle_and_splitter_labels_are_disjoint() {
+        // a–h never resolve to a splitter; i–z never resolve to a window handle.
+        for c in 'a'..='h' {
+            assert!(handle_from_label(c).is_some());
+            assert_eq!(splitter_from_label(c, MAX_SPLITTERS), None);
+        }
+        for c in 'i'..='z' {
+            assert_eq!(handle_from_label(c), None);
+            assert!(splitter_from_label(c, MAX_SPLITTERS).is_some());
+        }
     }
 }

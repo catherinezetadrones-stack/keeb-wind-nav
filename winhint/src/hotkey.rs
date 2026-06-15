@@ -24,8 +24,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU,
-    VK_RETURN, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetAsyncKeyState, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU,
+    VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, PostMessageW, PostThreadMessageW,
@@ -34,13 +34,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::app::{
-    WM_APP_CANCEL, WM_APP_CONFIRM, WM_APP_KEY, WM_APP_NAV, WM_APP_QUIT, WM_APP_SHOW, WM_APP_TAB,
+    WM_APP_CANCEL, WM_APP_CONFIRM, WM_APP_KEY, WM_APP_NAV, WM_APP_NAV_H, WM_APP_QUIT, WM_APP_RESIZE,
+    WM_APP_SHOW, WM_APP_TAB,
 };
 
 /// Virtual-key code for the `Q` key (no named constant in the windows crate).
 const VK_Q: u32 = 0x51;
 /// Low-level hook flag: the key is an extended key (e.g. Right Ctrl/Alt).
 const LLKHF_EXTENDED: u32 = 0x01;
+/// Max gap (ms) between two CapsLock taps to count as a double-tap → resize mode.
+/// Compared against `KBDLLHOOKSTRUCT.time`, which is a millisecond tick count.
+const DOUBLE_TAP_MS: u32 = 400;
 
 /// The app window to post intents to (HWND pointer as usize), whether hint mode
 /// is active, and whether to log keys. `HOOK_THREAD_ID` is the dedicated hook
@@ -49,6 +53,12 @@ static HOOK_TARGET: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static DEBUG: AtomicBool = AtomicBool::new(false);
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+/// True while resize mode is active (a sub-state of `ACTIVE`). Changes how the
+/// hook routes CapsLock (always exits, never re-triggers) and Left/Right arrows.
+static RESIZE_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// `KBDLLHOOKSTRUCT.time` of the CapsLock-down that entered hint mode, used to
+/// detect a quick second tap (→ resize). Only meaningful while `ACTIVE`.
+static LAST_CAPS_TIME: AtomicU32 = AtomicU32::new(0);
 
 /// Install the keyboard hook on a dedicated thread, posting intents to `hwnd`.
 ///
@@ -125,6 +135,11 @@ pub fn set_active(active: bool) {
     ACTIVE.store(active, Ordering::Relaxed);
 }
 
+/// Tell the hook whether resize mode is active (a sub-state of active).
+pub fn set_resize_active(resize: bool) {
+    RESIZE_ACTIVE.store(resize, Ordering::Relaxed);
+}
+
 /// Enable per-key logging to stderr (for diagnosing the hook).
 pub fn set_debug(debug: bool) {
     DEBUG.store(debug, Ordering::Relaxed);
@@ -197,7 +212,22 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 // --- Idle: CapsLock activates; Ctrl+Alt+Q quits. ---
                 if is_down {
                     if vk == VK_CAPITAL.0 as u32 {
-                        post(hwnd, WM_APP_SHOW, 0, 0);
+                        // Normally the first tap enters hint mode (and we record
+                        // its time so a second tap can be recognised as a
+                        // double-tap → resize). But a slow UIA scan can hold off
+                        // the ACTIVE flip past a quick second tap, so that second
+                        // CapsLock still lands here in the idle branch. Detect the
+                        // double-tap here too and post WM_APP_RESIZE: the app
+                        // applies it right after the queued WM_APP_SHOW has put it
+                        // into hint mode (enter_resize guards on that state).
+                        if kb.time.wrapping_sub(LAST_CAPS_TIME.load(Ordering::Relaxed))
+                            <= DOUBLE_TAP_MS
+                        {
+                            post(hwnd, WM_APP_RESIZE, 0, 0);
+                        } else {
+                            LAST_CAPS_TIME.store(kb.time, Ordering::Relaxed);
+                            post(hwnd, WM_APP_SHOW, 0, 0);
+                        }
                         return LRESULT(1); // suppress the Caps toggle
                     }
                     if vk == VK_Q && ctrl_alt_held() {
@@ -211,11 +241,26 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 // --- Active: route text/Enter/Tab keys; swallow other
                 //     non-modifier keys. Shift (bit 0 of lparam) selects
                 //     right-click vs left-click for Enter / hint commit. ---
+                let resize = RESIZE_ACTIVE.load(Ordering::Relaxed);
                 if is_down {
-                    // CapsLock doubles as the cancel key (symmetric with the
-                    // trigger), alongside Esc. Either one exits hint mode.
-                    if vk == VK_ESCAPE.0 as u32 || vk == VK_CAPITAL.0 as u32 {
+                    // Esc always exits (in resize mode it restores the original
+                    // rect; in hint mode it just cancels — the app decides).
+                    if vk == VK_ESCAPE.0 as u32 {
                         post(hwnd, WM_APP_CANCEL, 0, 0);
+                        return LRESULT(1);
+                    }
+                    // CapsLock: in resize mode it exits; in hint mode a quick
+                    // second tap (within DOUBLE_TAP_MS of the activating tap)
+                    // upgrades to resize mode, otherwise it cancels.
+                    if vk == VK_CAPITAL.0 as u32 {
+                        if !resize
+                            && kb.time.wrapping_sub(LAST_CAPS_TIME.load(Ordering::Relaxed))
+                                <= DOUBLE_TAP_MS
+                        {
+                            post(hwnd, WM_APP_RESIZE, 0, 0);
+                        } else {
+                            post(hwnd, WM_APP_CANCEL, 0, 0);
+                        }
                         return LRESULT(1);
                     }
                     if vk == VK_RETURN.0 as u32 {
@@ -223,16 +268,32 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                         return LRESULT(1);
                     }
                     if vk == VK_TAB.0 as u32 {
-                        post(hwnd, WM_APP_TAB, 0, 0);
+                        // Tab cycles match mode in hint mode; no-op (swallowed) in
+                        // resize mode.
+                        if !resize {
+                            post(hwnd, WM_APP_TAB, 0, 0);
+                        }
                         return LRESULT(1);
                     }
-                    // Arrow Up/Down move the list selection (wparam: 0=up, 1=down).
+                    // Arrow Up/Down: move the list selection (hint mode) or a
+                    // handle's edge vertically (resize mode). Shift → fine step.
                     if vk == VK_UP.0 as u32 {
-                        post(hwnd, WM_APP_NAV, 0, 0);
+                        post(hwnd, WM_APP_NAV, 0, shift_held() as isize);
                         return LRESULT(1);
                     }
                     if vk == VK_DOWN.0 as u32 {
-                        post(hwnd, WM_APP_NAV, 1, 0);
+                        post(hwnd, WM_APP_NAV, 1, shift_held() as isize);
+                        return LRESULT(1);
+                    }
+                    // Arrow Left/Right: move a handle's edge horizontally in
+                    // resize mode (Shift → fine step). Ignored (but swallowed) in
+                    // hint mode by the catch-all below.
+                    if resize && vk == VK_LEFT.0 as u32 {
+                        post(hwnd, WM_APP_NAV_H, 0, shift_held() as isize);
+                        return LRESULT(1);
+                    }
+                    if resize && vk == VK_RIGHT.0 as u32 {
+                        post(hwnd, WM_APP_NAV_H, 1, shift_held() as isize);
                         return LRESULT(1);
                     }
                     if is_text_key(vk) {

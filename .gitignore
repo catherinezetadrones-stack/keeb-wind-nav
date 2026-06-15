@@ -4,6 +4,9 @@
 # Claude Code runtime lock
 .claude/scheduled_tasks.lock
 
+# graphify generated knowledge-graph output
+graphify-out/
+
 # OS / editor cruft
 Thumbs.db
 .DS_Store

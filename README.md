@@ -1,6 +1,7 @@
-<!-- Hero visual goes here — generated later with the /repo-visuals skill.
-     Replace this comment with the exported image/GIF, e.g.:
-     ![WinHint demo](docs/hero.gif) -->
+<p align="center">
+  <img src="assets/hero.gif" width="860"
+       alt="WinHint demo: tapping CapsLock labels every clickable element on a dark GitHub page with cyan hint codes; typing a name or label narrows the matches and clicks the Code button — no mouse.">
+</p>
 
 # WinHint
 

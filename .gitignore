@@ -1,6 +1,9 @@
 # Rust build artifacts
 /winhint/target/
 
+# Inno Setup compiled installers
+/installer/Output/
+
 # Claude Code runtime lock
 .claude/scheduled_tasks.lock
 

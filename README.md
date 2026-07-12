@@ -1,6 +1,6 @@
 <p align="center">
   <img src="assets/hero.gif" width="860"
-       alt="WinHint demo: tapping CapsLock labels every clickable element on a dark GitHub page with cyan hint codes; typing a name or label narrows the matches and clicks the Code button — no mouse.">
+       alt="WinHint demo: tapping CapsLock fills a Windows browser window with cyan alphabetic hint labels over every clickable element; typing an element's name selects and clicks it with no mouse, then double-tapping CapsLock shows gold resize handles that nudge the window's edge with the arrow keys.">
 </p>
 
 # WinHint

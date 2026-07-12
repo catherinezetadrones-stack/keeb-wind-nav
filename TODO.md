@@ -73,45 +73,64 @@ _Require knowledge about firmware and may require web access for research_
 
 _Goal: install and run this on the user's other computer as an everyday tool._
 
-- **Installer.** Produce a proper Windows installer for `winhint.exe` (optional
+- ✅ **Installer — DONE.** Produce a proper Windows installer for `winhint.exe` (optional
   run-at-startup). Decide tooling (e.g. WiX/MSI, Inno Setup, or MSIX).
-- **System tray icon, not a taskbar window.** Run as a background tray app with a
+  **Done (2026-07-11):** Inno Setup (`installer/winhint.iss`) with an optional
+  run-at-sign-in task; builds `installer/Output/WinHint-Setup-0.1.0.exe`.
+- ✅ **System tray icon, not a taskbar window — DONE.** Run as a background tray app with a
   minimal notification-area icon (right-click menu: pause/resume, quit, maybe open
   config). No full taskbar / Alt-Tab presence (the overlay window is already
   `WS_EX_TOOLWINDOW`).
-- **Publisher identity + code signing.** The installer/exe should show the user as
+  **Done:** `winhint/src/tray.rs` — notification-area icon with a right-click
+  Pause/Resume + Quit menu.
+- ⚠️ **Publisher identity + code signing — PARTIAL.** The installer/exe should show the user as
   the publisher (nice display name) and be **signed** so SmartScreen/Defender
   don't flag it. Needs: a code-signing certificate (self-signed is free but still
   warns; an OV/EV cert avoids SmartScreen warnings but costs money) and a chosen
   publisher display name. CONFIRM cert availability + exact publisher name before
   starting.
+  **Done:** publisher display name set (`AppPublisher "Phillip L. Bronson"` in `winhint.iss`).
+  **Still open:** signing is intentionally deferred — the installer is unsigned, so
+  SmartScreen warns on first run until a code-signing cert is wired in.
 
 
 ## Repo & Publishing (GitHub)
 
 _Goal: publish a clean, best-practices open-source repo._
 
-- **MIT license.** Add a `LICENSE` (MIT) with the user as copyright holder, so the
+- ✅ **MIT license — DONE.** Add a `LICENSE` (MIT) with the user as copyright holder, so the
   user owns the app and others may fork with attribution. Confirm the exact
   copyright name/year to use.
-- **Contributors / authorship.** Primary author `czd` (GitHub
-  `catherinezetadrones-stack`); secondary account `phbronson` (GitHub
-  `phbronson999`). Keep commit authorship as `czd` per project rule; never add
-  Claude as co-author.
-- **README with visuals.** DONE (first pass): animated hero at `assets/hero.gif`
-  embedded at the top of the README (dark-mode GitHub page, BOTH-mode search →
-  Code button). Built with `/repo-visuals`; puppeteer + portable ffmpeg are now
-  installed for future runs.
-  - **Polish the hero later** (user: "clean it up another time"): e.g. dim the
-    non-selected `QC` label at the click moment, tune typing pace / label density,
-    maybe a VS Code example too.
-- **Repo hygiene.** Follow open-source best practices (README, LICENSE,
+  **Done:** `LICENSE` (MIT) © 2026 Phillip L. Bronson; referenced from the README.
+- ✅ **Contributors / authorship — DONE.** Primary author GitHub
+  `catherinezetadrones-stack`; secondary account `phbronson` (GitHub
+  `phbronson999`). Never add Claude as co-author.
+  **Updated 2026-07-11:** commit authorship changed from `czd`
+  (`654szp68kv@privaterelay.appleid.com`, which wasn't linking contributions on
+  GitHub) to `catherinezetadrones-stack`
+  (`293272542+catherinezetadrones-stack@users.noreply.github.com`). All 14 commits
+  + the `v0.1.0` tag were rewritten and force-pushed to this identity.
+- ✅ **README with visuals — DONE.** Animated hero at `assets/hero.gif` embedded at
+  the top of the README. Built with `/repo-visuals`; puppeteer + portable ffmpeg
+  are installed for future runs.
+  **Updated 2026-07-11:** replaced the earlier synthetic HTML hero with a real
+  screen recording of WinHint in use — hint-mode label bloom → search-as-you-type
+  name-match clicks → double-tap window-resize with live size readout.
+  - **Optional future polish:** re-encode lighter (12fps / 900px ≈ 3.5 MB), scrub
+    the parked mouse cursor, or add a VS Code example clip.
+- ✅ **Repo hygiene — DONE (core).** Follow open-source best practices (README, LICENSE,
   `.gitignore` already present, maybe CONTRIBUTING, release build instructions).
+  **Done:** README, LICENSE, `.gitignore`, and release build instructions all present.
+  **Still optional:** a dedicated `CONTRIBUTING.md` (the README already has a
+  Contributing section).
 
 
 ## Tooling & Workflow
 
-- **Transferable workflow skill.** This repo is the prototype for the user's other
+- ✅ **Transferable workflow skill — DONE.** This repo is the prototype for the user's other
   passion projects. Create a reusable skill capturing this workflow (TODO-driven,
   planner→implement→reviewer loop, RESUME.md handoff, commit/authorship rules) so
   the same process applies across all projects.
+  **Done:** the `setup-project` skill scaffolds the standard workflow (CLAUDE.md,
+  TODO.md, planner/reviewer subagents, RESUME.md handoff); the `ship` skill drives
+  publishing.

@@ -27,6 +27,8 @@ and summarize what changed.
 
 _Straightforward changes to the existing interface_
 
+- **This app needs a better name - winhint is terrible** - winhint is a objectively a bad name. Pick a better one.
+
 ### New App Features
 
 _More substantial additions to the app itself_
@@ -96,10 +98,13 @@ _Goal: publish a clean, best-practices open-source repo._
   `catherinezetadrones-stack`); secondary account `phbronson` (GitHub
   `phbronson999`). Keep commit authorship as `czd` per project rule; never add
   Claude as co-author.
-- **README with visuals.** Use the `/repo-visuals` skill to produce screen
-  recordings / hero visuals of the hint-mode navigation for the `README.md`:
-  - Use a **clean desktop** for the Windows-app examples.
-  - Use a website (GitHub) and/or VS Code for the other examples.
+- **README with visuals.** DONE (first pass): animated hero at `assets/hero.gif`
+  embedded at the top of the README (dark-mode GitHub page, BOTH-mode search →
+  Code button). Built with `/repo-visuals`; puppeteer + portable ffmpeg are now
+  installed for future runs.
+  - **Polish the hero later** (user: "clean it up another time"): e.g. dim the
+    non-selected `QC` label at the click moment, tune typing pace / label density,
+    maybe a VS Code example too.
 - **Repo hygiene.** Follow open-source best practices (README, LICENSE,
   `.gitignore` already present, maybe CONTRIBUTING, release build instructions).
 
